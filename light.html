@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>desert ambivert · light motion</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#05060a; overflow:hidden;
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; color:#7a8090; }
+  body { display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; box-shadow: 0 30px 90px rgba(0,0,0,.6); }
+  .panel { position:fixed; left:14px; bottom:12px; display:flex; gap:14px; align-items:center;
+    padding:8px 12px; background:rgba(10,12,18,.55); backdrop-filter: blur(8px);
+    border:1px solid rgba(255,255,255,.06); border-radius:8px; }
+  .panel label { cursor:pointer; color:#aab1c2; }
+  .panel input[type=file]{ display:none; }
+  .panel .sep { width:1px; height:14px; background:rgba(255,255,255,.08); }
+  .panel .k { color:#5a6070; }
+  .err { position:fixed; top:14px; left:14px; right:14px; padding:10px 14px;
+    background:#1a0a0a; color:#ff8a8a; border:1px solid #4a1a1a; border-radius:6px;
+    display:none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="panel">
+  <span><span class="k">image:</span> desertAmbivert.jpeg</span>
+  <span class="sep"></span>
+  <label><input type="file" accept="image/*" id="file">load other image</label>
+</div>
+<div class="err" id="err"></div>
+
+<script>
+const canvas = document.getElementById('c');
+const errEl = document.getElementById('err');
+const gl = canvas.getContext('webgl2', { antialias:false, premultipliedAlpha:false });
+if (!gl) { errEl.style.display='block'; errEl.textContent='WebGL2 not available in this browser.'; }
+
+const VS = `#version 300 es
+in vec2 aPos;
+out vec2 vUv;
+void main(){
+  vUv = aPos * 0.5 + 0.5;
+  vUv.y = 1.0 - vUv.y;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+const FS = `#version 300 es
+precision highp float;
+
+uniform sampler2D uTex;
+uniform vec2  uTexRes;
+uniform float uTime;
+
+in vec2 vUv;
+out vec4 outColor;
+
+float hash21(vec2 p){
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  vec2 u = f*f*(3.0 - 2.0*f);
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+float fbm(vec2 p){
+  float v = 0.0, a = 0.5;
+  for (int i=0; i<6; i++){ v += a * vnoise(p); p = p*2.03 + 11.7; a *= 0.5; }
+  return v;
+}
+
+// Iñigo Quilez-style domain-warped fbm — gives the marbled, oily, fingerprint-whorl feel.
+float marbled(vec2 p, float t, out vec2 q, out vec2 r){
+  q = vec2(fbm(p + vec2(0.0, 0.0) + t*0.05),
+           fbm(p + vec2(5.2, 1.3) + t*0.07));
+  r = vec2(fbm(p + 4.0*q + vec2(1.7, 9.2) - t*0.04),
+           fbm(p + 4.0*q + vec2(8.3, 2.8) + t*0.06));
+  return fbm(p + 4.0*r);
+}
+
+// pastel iridescent palette (Spratt-leaning: cream, peach, mint, lavender, pearl)
+vec3 pearlescent(float t){
+  vec3 a = vec3(0.78, 0.74, 0.70);   // warm cream center
+  vec3 b = vec3(0.22, 0.20, 0.24);   // gentle amplitude
+  vec3 c = vec3(0.95, 0.85, 0.78);   // hue spacing
+  vec3 d = vec3(0.05, 0.45, 0.78);   // phase: peach -> mint -> lavender
+  return a + b * cos(6.2831 * (c * t + d));
+}
+
+// luminance gradient -> fake surface normal, for a "wet skin" sheen
+vec3 normalFromLuma(vec2 uv, vec2 px){
+  float l = dot(texture(uTex, uv - vec2(px.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
+  float r = dot(texture(uTex, uv + vec2(px.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
+  float u = dot(texture(uTex, uv - vec2(0.0, px.y)).rgb, vec3(0.299, 0.587, 0.114));
+  float d = dot(texture(uTex, uv + vec2(0.0, px.y)).rgb, vec3(0.299, 0.587, 0.114));
+  return normalize(vec3((r - l) * 6.0, (d - u) * 6.0, 1.0));
+}
+
+void main(){
+  vec2 uv = vUv;
+  vec2 px = 1.0 / uTexRes;
+
+  // ---- soft cactus-region mask (lets the texture bleed a little into the surroundings) ----
+  vec3 raw = texture(uTex, uv).rgb;
+  float lum     = dot(raw, vec3(0.2126, 0.7152, 0.0722));
+  float coolness = (raw.b + raw.g * 0.7) - raw.r * 1.3;
+  float body    = smoothstep(-0.05, 0.45, coolness) * smoothstep(0.18, 0.65, lum);
+  float spine   = smoothstep(0.75, 1.0, lum) * smoothstep(0.55, 1.0, raw.b + raw.g * 0.5);
+  float skyKill = smoothstep(0.40, 0.0, uv.y) * smoothstep(0.20, 0.05, raw.g);
+  float mask    = clamp(max(body, spine) - skyKill, 0.0, 1.0);
+  // expand the mask slightly with a soft falloff
+  mask = pow(mask, 0.65);
+
+  // ---- domain-warped sample of the original image (slow fluid distortion) ----
+  vec2 q, r;
+  float marble = marbled(uv * 3.2, uTime, q, r);
+  vec2  warp   = (r - 0.5) * 0.018 * (0.6 + mask);     // less drift outside the cactus
+  vec3  base   = texture(uTex, uv + warp).rgb;
+
+  // ---- swirly painterly whorls (multi-scale fbm with curl-like rotation) ----
+  vec2 sp = uv * vec2(uTexRes.x / uTexRes.y, 1.0) * 9.0;
+  float a1 = fbm(sp + uTime * 0.05);
+  float a2 = fbm(sp * 2.1 + vec2(a1) * 3.0 - uTime * 0.07);
+  float swirl = fbm(sp + vec2(cos(a2 * 6.2831), sin(a2 * 6.2831)) * 1.4);
+
+  // sharp thin highlight ridges — the "fingerprint" / brushstroke feel
+  float ridge = 1.0 - abs(swirl - 0.5) * 2.0;
+  ridge = pow(ridge, 6.0);
+
+  // ultra-fine pearlescent flecks
+  float fleck = pow(fbm(uv * uTexRes * 0.12 + uTime * 0.2), 3.0);
+
+  // ---- iridescence driven by marble field + fake normal sheen ----
+  vec3 n = normalFromLuma(uv, px);
+  vec3 viewDir = vec3(0.0, 0.0, 1.0);
+  float fres = pow(1.0 - max(dot(n, viewDir), 0.0), 2.5);
+  float iriT = marble * 1.4 + fres * 0.7 + uTime * 0.04 + swirl * 0.3;
+  vec3 irid  = pearlescent(iriT);
+
+  // ---- compose ----
+  // Keep original cactus color grading. Add painterly TEXTURE (whorls, ridges,
+  // sheen) on top, not a hue re-tint. Iridescence enters only as a faint shimmer.
+  vec3 col = base;
+
+  // swirly whorl modulation — uses ORIGINAL color; ridges brighten, troughs darken slightly,
+  // so the surface reads as painted form without changing its color
+  float modSwirl = (swirl - 0.5);
+  col *= 1.0 + modSwirl * 0.18 * mask;
+
+  // very subtle iridescent shimmer — tiny hue drift, low amplitude
+  vec3 iridShift = (irid - 0.5);
+  col += iridShift * 0.05 * mask;
+
+  // thin pearlescent highlight ridges — slightly tinted with the cactus's own cool color
+  // so they read as wet sheen, not paint
+  vec3 sheen = mix(vec3(1.0, 1.0, 1.05), normalize(base + 0.001) * 1.5, 0.35);
+  col += sheen * ridge * mask * 0.45;
+
+  // bright pearl flecks — neutral white, very small
+  col += vec3(1.0, 1.0, 1.0) * fleck * mask * 0.22;
+
+  // slow breathing in luminance only — no hue change
+  col *= 1.0 + 0.06 * (irid.r + irid.g + irid.b - 1.5) * mask;
+
+  // gentle vignette
+  vec2 vc = uv - 0.5;
+  col *= mix(0.80, 1.0, smoothstep(0.85, 0.25, length(vc)));
+
+  outColor = vec4(col, 1.0);
+}`;
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(s));
+    throw new Error('shader compile failed');
+  }
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.bindAttribLocation(prog, 0, 'aPos');
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+  console.error(gl.getProgramInfoLog(prog));
+}
+gl.useProgram(prog);
+
+// fullscreen quad
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+const uTex    = gl.getUniformLocation(prog, 'uTex');
+const uTexRes = gl.getUniformLocation(prog, 'uTexRes');
+const uTime   = gl.getUniformLocation(prog, 'uTime');
+
+let texture = null;
+let texW = 0, texH = 0;
+
+function uploadImage(img){
+  texW = img.naturalWidth;
+  texH = img.naturalHeight;
+  if (texture) gl.deleteTexture(texture);
+  texture = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.uniform1i(uTex, 0);
+  gl.uniform2f(uTexRes, texW, texH);
+  resize();
+}
+
+function resize(){
+  if (!texW) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const ratio = texW / texH;
+  let w = window.innerWidth, h = window.innerHeight;
+  if (w / h > ratio) w = h * ratio; else h = w / ratio;
+  canvas.style.width  = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width  = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+
+const t0 = performance.now();
+function frame(){
+  if (texture){
+    gl.uniform1f(uTime, (performance.now() - t0) / 1000);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// --- image loading: try same-folder fetch first; fall back to file picker / drag-drop ---
+function loadFromBlob(blob){
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => { URL.revokeObjectURL(url); uploadImage(img); errEl.style.display='none'; };
+  img.onerror = () => showErr('failed to decode image');
+  img.src = url;
+}
+function showErr(msg){ errEl.textContent = msg; errEl.style.display = 'block'; }
+
+(async function tryAuto(){
+  try {
+    const res = await fetch('desertAmbivert.jpeg');
+    if (!res.ok) throw new Error('http ' + res.status);
+    loadFromBlob(await res.blob());
+  } catch (e) {
+    showErr("can't auto-load the image over file:// — click 'load other image' below, drag the jpeg onto the page, or run a quick local server in this folder:  python3 -m http.server  then open http://localhost:8000/light.html");
+  }
+})();
+
+document.getElementById('file').addEventListener('change', e => {
+  const f = e.target.files[0]; if (f) loadFromBlob(f);
+});
+window.addEventListener('dragover', e => { e.preventDefault(); });
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) loadFromBlob(f);
+});
+</script>
+</body>
+</html>
